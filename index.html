@@ -1245,6 +1245,91 @@ footer a{color:var(--accent)}
 <div class="mmenu" id="mmenu" hidden role="dialog" aria-modal="true" aria-label="Menú de Her"><div class="mm-in" id="mmIn"></div></div>
 <div class="toast" id="toast" hidden role="status"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script>
+/* Her en vivo con Supabase: cuentas reales, base de datos compartida y archivos.
+   Si no hay conexión con Supabase, Her pasa a modo demostración. */
+(function(){
+if(window.claude)return;
+const CFG={url:'https://onfukrenntddqulcivyv.supabase.co',key:'sb_publishable_lvRRPx0_nfPYc-Y8g4wtxg_Lgk2YNNi',bucket:'her'};
+let mode='live';try{mode=localStorage.getItem('her-mode')||'live'}catch(e){}
+if(mode==='demo'||typeof supabase==='undefined'||!supabase.createClient)return;
+window.HER_LIVE=true;
+const sb=supabase.createClient(CFG.url,CFG.key,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});
+window.HER_SB=sb;
+const parent=p=>p.slice(0,p.lastIndexOf('/'));
+const clone=x=>x==null?x:JSON.parse(JSON.stringify(x));
+const cache=new Map(),loadedC=new Set(),loadedD=new Set(),listeners=new Set();
+let notifyT=null;
+const notify=()=>{clearTimeout(notifyT);notifyT=setTimeout(()=>listeners.forEach(l=>{try{l()}catch(e){}}),30)};
+const snapDoc=p=>({id:p.split('/').pop(),exists:cache.has(p),data:()=>clone(cache.get(p)),ref:{path:p}});
+function err(e){const x=new Error(e&&e.message||'error');x.code=e&&e.code||'error';return x}
+async function loadColl(c){if(loadedC.has(c))return;loadedC.add(c);const {data,error}=await sb.from('docs').select('path,data').eq('coll',c).limit(5000);if(error){loadedC.delete(c);throw err(error)}(data||[]).forEach(r=>cache.set(r.path,r.data));notify()}
+async function loadDoc(p){if(loadedD.has(p)||loadedC.has(parent(p)))return;loadedD.add(p);const {data,error}=await sb.from('docs').select('path,data').eq('path',p).maybeSingle();if(error){loadedD.delete(p);throw err(error)}if(data)cache.set(data.path,data.data);else cache.delete(p);notify()}
+async function write(p,d){const prev=cache.get(p);cache.set(p,clone(d));loadedD.add(p);notify();
+  const {error}=await sb.from('docs').upsert({path:p,coll:parent(p),data:d});if(error){if(prev===undefined)cache.delete(p);else cache.set(p,prev);notify();throw err(error)}}
+function docRef(p){return{path:p,id:p.split('/').pop(),
+  get:async()=>{await loadDoc(p);return snapDoc(p)},set:d=>write(p,d),
+  update:async d=>{await loadDoc(p);return write(p,{...(cache.get(p)||{}),...clone(d)})},
+  delete:async()=>{const prev=cache.get(p);cache.delete(p);notify();const {error}=await sb.from('docs').delete().eq('path',p);if(error){if(prev!==undefined)cache.set(p,prev);notify();throw err(error)}},
+  onSnapshot(n,onErr){let last;const f=()=>{const s=snapDoc(p),k=JSON.stringify([s.exists,cache.get(p)]);if(k===last)return;last=k;n(s)};listeners.add(f);loadDoc(p).then(f,e=>onErr&&onErr(e));f();return()=>listeners.delete(f)},
+  collection:c=>q(p+'/'+c)}}
+function q(c,o={}){const run=()=>{let ds=[...cache.keys()].filter(k=>parent(k)===c).map(snapDoc);
+    (o.where||[]).forEach(([f,op,v])=>{ds=ds.filter(d=>{const x=(d.data()||{})[f];return op==='=='?x===v:op==='>'?x>v:op==='<'?x<v:op==='>='?x>=v:op==='<='?x<=v:op==='array-contains'?Array.isArray(x)&&x.includes(v):true})});
+    if(o.ord){const[f,dir]=o.ord;ds.sort((a,b)=>{const x=(a.data()||{})[f]??0,y=(b.data()||{})[f]??0;return(x>y?1:x<y?-1:0)*(dir==='desc'?-1:1)})}
+    if(o.lim)ds=ds.slice(0,o.lim);return{docs:ds,size:ds.length,empty:!ds.length,forEach:fn=>ds.forEach(fn),docChanges:()=>[]}};
+  return{orderBy:(f,d='asc')=>q(c,{...o,ord:[f,d]}),limit:n=>q(c,{...o,lim:n}),where:(f,op,v)=>q(c,{...o,where:[...(o.where||[]),[f,op,v]]}),doc:id=>docRef(c+'/'+id),
+    get:async()=>{await loadColl(c);return run()},
+    onSnapshot(n,onErr){let last;const f=()=>{if(!loadedC.has(c))return;const r=run(),k=JSON.stringify(r.docs.map(d=>[d.id,cache.get(c+'/'+d.id)]));if(k===last)return;last=k;n(r)};listeners.add(f);loadColl(c).then(f,e=>onErr&&onErr(e));return()=>listeners.delete(f)}}}
+const db={doc:docRef,collection:c=>q(c)};
+const pubUrl=id=>CFG.url+'/storage/v1/object/public/'+CFG.bucket+'/'+id.split('/').map(encodeURIComponent).join('/');
+const READY=(async()=>{const {data:{session}}=await sb.auth.getSession();if(!session)return null;
+  const uid=session.user.id;let admin=false;try{const r=await sb.rpc('is_admin');admin=!!r.data}catch(e){}
+  sb.channel('her-docs').on('postgres_changes',{event:'*',schema:'public',table:'docs'},pl=>{if(pl.eventType==='DELETE'){const p=pl.old&&pl.old.path;if(p){cache.delete(p);notify()}}else if(pl.new&&pl.new.path){cache.set(pl.new.path,pl.new.data);notify()}}).subscribe();
+  const user={id:async()=>uid,me:async()=>({id:uid,name:''}),canEdit:async()=>admin,isOwner:async()=>admin,can:async()=>true,profiles:async ids=>Object.fromEntries((ids||[]).map(i=>[i,{id:i,name:''}]))};
+  const EXT={'image/jpeg':'jpg','image/png':'png','image/webp':'webp','video/mp4':'mp4','video/webm':'webm','audio/mp4':'m4a','audio/webm':'weba'};
+  const assets={upload:async(blob,opt)=>{const type=(opt&&opt.type)||blob.type||'application/octet-stream';if(blob.size>50*1024*1024){const e=new Error('too_large');e.code='too_large';throw e}
+      const id=uid+'/'+Date.now().toString(36)+Math.random().toString(36).slice(2,8)+'.'+(EXT[type]||'bin');
+      const {error}=await sb.storage.from(CFG.bucket).upload(id,blob,{contentType:type,upsert:false});if(error){const e=new Error(error.message);e.code=/size|large/i.test(error.message)?'too_large':/mime|type/i.test(error.message)?'unsupported_type':'error';throw e}
+      return{id,url:pubUrl(id),sizeBytes:blob.size,contentType:type}},
+    delete:async id=>{await sb.storage.from(CFG.bucket).remove([id]);return{deleted:true}},list:async()=>({assets:[],usage:{}})};
+  return{db,user,assets,uid}})();
+const downloads={save:async({filename,data})=>{const a=document.createElement('a');a.href=URL.createObjectURL(data instanceof Blob?data:new Blob([data]));a.download=filename;document.body.appendChild(a);a.click();a.remove();return{saved:true}}};
+window.claude={use:async k=>{const r=await READY;if(!r)return null;return({db:r.db,user:r.user,assets:r.assets,downloads})[k]||null}};
+
+/* /_blob/<id> → dirección pública del archivo */
+const fix=el=>{const s=el.getAttribute('src');if(s&&s.startsWith('/_blob/'))el.setAttribute('src',pubUrl(s.slice(7)))};
+const scan=root=>{if(root.querySelectorAll)root.querySelectorAll('img[src^="/_blob/"],video[src^="/_blob/"],audio[src^="/_blob/"]').forEach(fix);if(root.matches&&root.matches('img[src^="/_blob/"],video[src^="/_blob/"],audio[src^="/_blob/"]'))fix(root)};
+new MutationObserver(ms=>ms.forEach(m=>{if(m.type==='attributes')fix(m.target);else m.addedNodes.forEach(n=>n.nodeType===1&&scan(n))})).observe(document.documentElement,{subtree:true,childList:true,attributes:true,attributeFilter:['src']});
+const _img=Object.getOwnPropertyDescriptor(HTMLImageElement.prototype,'src');
+Object.defineProperty(HTMLImageElement.prototype,'src',{get(){return _img.get.call(this)},set(v){if(typeof v==='string'&&v.startsWith('/_blob/')){v=pubUrl(v.slice(7));this.crossOrigin='anonymous'}_img.set.call(this,v)}});
+
+/* entrar o crear cuenta */
+function loginUI(){if(document.getElementById('herLogin'))return;const g=document.createElement('div');g.id='herLogin';g.className='hl';g.setAttribute('role','dialog');g.setAttribute('aria-modal','true');g.setAttribute('aria-labelledby','hlT');
+  g.innerHTML=`<form class="hl-box" id="hlForm"><span class="script">bienvenida a</span><h2 id="hlT">Her</h2><p class="hl-s">Todas tus versiones merecen brillar</p>
+   <div class="hl-tabs" role="tablist"><button type="button" class="on" data-hl="in">Entrar</button><button type="button" data-hl="up">Crear cuenta</button></div>
+   <label class="f">Correo<input id="hlE" type="email" autocomplete="email" required></label><label class="f">Contraseña<input id="hlP" type="password" minlength="6" autocomplete="current-password" required></label>
+   <p class="hl-msg" id="hlM" role="status"></p><button class="btn primary" type="submit" id="hlB">Entrar</button>
+   <button type="button" class="link" data-hl="forgot">¿Olvidaste tu contraseña?</button>
+   <p class="note" style="margin:0;font-size:13px">Her es para mujeres mayores de 18 años. Tu correo no se muestra a nadie.</p>
+   <button type="button" class="btn soft" data-hl="demo">Ver Her en modo demostración</button></form>`;
+  document.body.appendChild(g);let tab='in';const M=t=>{document.getElementById('hlM').textContent=t};
+  g.addEventListener('click',async e=>{const b=e.target.closest('[data-hl]');if(!b)return;const k=b.dataset.hl;
+    if(k==='in'||k==='up'){tab=k;g.querySelectorAll('.hl-tabs button').forEach(x=>x.classList.toggle('on',x===b));document.getElementById('hlB').textContent=k==='in'?'Entrar':'Crear mi cuenta';document.getElementById('hlP').autocomplete=k==='in'?'current-password':'new-password';M('')}
+    if(k==='demo'){try{localStorage.setItem('her-mode','demo')}catch(x){}location.reload()}
+    if(k==='forgot'){const em=document.getElementById('hlE').value.trim();if(!em){M('Escribe tu correo arriba y vuelve a tocar aquí.');return}const {error}=await sb.auth.resetPasswordForEmail(em,{redirectTo:location.href.split('#')[0]});M(error?'No se pudo enviar: '+error.message:'Te enviamos un correo para crear una contraseña nueva.')}});
+  document.getElementById('hlForm').addEventListener('submit',async e=>{e.preventDefault();const em=document.getElementById('hlE').value.trim(),pw=document.getElementById('hlP').value,btn=document.getElementById('hlB');btn.disabled=true;M('Un momento…');
+    try{if(tab==='up'){const {data,error}=await sb.auth.signUp({email:em,password:pw,options:{emailRedirectTo:location.href.split('#')[0]}});if(error)throw error;if(data.session){location.reload();return}M('¡Listo! Revisa tu correo y toca el enlace para confirmar tu cuenta. Después entra aquí.')}
+      else{const {error}=await sb.auth.signInWithPassword({email:em,password:pw});if(error)throw error;location.reload()}}
+    catch(x){M(/invalid login/i.test(x.message)?'Correo o contraseña incorrectos.':/not confirmed/i.test(x.message)?'Primero confirma tu cuenta con el enlace que te enviamos al correo.':/registered/i.test(x.message)?'Ese correo ya tiene cuenta. Toca "Entrar".':'No se pudo: '+x.message)}finally{btn.disabled=false}})}
+function newPassUI(){const p=prompt('Escribe tu contraseña nueva (mínimo 6 caracteres):');if(p&&p.length>=6)sb.auth.updateUser({password:p}).then(({error})=>alert(error?'No se pudo cambiar: '+error.message:'Contraseña cambiada. ¡Bienvenida de nuevo!'))}
+sb.auth.onAuthStateChange(ev=>{if(ev==='PASSWORD_RECOVERY')setTimeout(newPassUI,300)});
+window.HER_LOGOUT=async()=>{await sb.auth.signOut();location.hash='';location.reload()};
+document.addEventListener('DOMContentLoaded',async()=>{const st=document.createElement('style');st.textContent=`.hl{position:fixed;inset:0;z-index:95;display:grid;place-items:center;padding:20px;overflow:auto;background:radial-gradient(60% 60% at 70% 30%,#ffd6e8,transparent),linear-gradient(150deg,#fff6fa,#ffd9ea)}.hl-box{width:min(420px,100%);display:grid;gap:12px;justify-items:stretch;text-align:center;background:rgba(255,255,255,.9);padding:30px 26px;border-radius:32px;box-shadow:0 30px 70px -30px rgba(255,79,154,.55);color:#5a1240}.hl-box h2{font-family:var(--brand,var(--display));font-style:italic;font-weight:900;font-size:64px;line-height:1;color:#e2287a;margin:0}.hl-s{font-family:var(--brand,var(--display));font-style:italic;font-weight:800;margin:0}.hl-box .f{text-align:left}.hl-tabs{display:grid;grid-template-columns:1fr 1fr;background:#ffe3ef;border-radius:999px;padding:4px}.hl-tabs button{border:0;background:none;border-radius:999px;padding:8px;font-weight:800;color:#9a4a78}.hl-tabs button.on{background:#fff;color:#c91f72;box-shadow:0 2px 8px rgba(200,40,120,.15)}.hl-msg{margin:0;min-height:1.2em;font-weight:700;color:#c91f72;font-size:14px}.hl-box input{width:100%;margin-top:4px;border:1.5px solid #f8cfe2;border-radius:14px;padding:11px 14px;background:#fff;font:inherit;color:#4a1238}.hl-box input:focus{outline:2px solid #e63f8a;border-color:transparent}.hl-box .btn{justify-content:center;text-align:center}.hl-box .link{border:0;background:none;color:#9a4a78;font-weight:700;text-decoration:underline;cursor:pointer}`;document.head.appendChild(st);
+  const r=await READY;if(!r)loginUI()});
+})();
+
+</script>
 <script>
 /* Her: modo demostración para GitHub Pages.
    Si Her no está dentro de Claude, este archivo crea una base de datos local (en el navegador)
@@ -1357,8 +1442,8 @@ if(!store.__seeded){const now=Date.now(),H=36e5,D=864e5,ws=(()=>{const d=new Dat
   store.__seeded=true;try{localStorage.setItem(LS,JSON.stringify(store))}catch(e){}}
 
 /* aviso de modo demostración */
-document.addEventListener('DOMContentLoaded',()=>{const b=document.createElement('div');b.className='demo-bar';b.innerHTML='✨ <b>Modo demostración:</b> el contenido es de ejemplo y lo que subas se guarda solo en este navegador. Tú eres la administradora: aprueba lo que subas en <a href="#revision">Revisión</a>. <button aria-label="Cerrar aviso">✕</button>';
-  b.querySelector('button').onclick=()=>b.remove();document.body.appendChild(b);
+document.addEventListener('DOMContentLoaded',()=>{const b=document.createElement('div');b.className='demo-bar';b.innerHTML='✨ <b>Modo demostración:</b> el contenido es de ejemplo y lo que subas se guarda solo en este navegador. Tú eres la administradora: aprueba lo que subas en <a href="#revision">Revisión</a>. <a href="#" id="goLive">Entrar con mi cuenta</a> <button aria-label="Cerrar aviso">✕</button>';
+  b.querySelector('button').onclick=()=>b.remove();b.querySelector('#goLive').onclick=e=>{e.preventDefault();try{localStorage.setItem('her-mode','live')}catch(x){}location.reload()};document.body.appendChild(b);
   const st=document.createElement('style');st.textContent='.demo-bar{position:fixed;left:12px;right:12px;bottom:12px;z-index:90;max-width:720px;margin:0 auto;padding:10px 40px 10px 14px;border-radius:16px;background:#fff6d9;color:#5a1240;font-size:13px;line-height:1.45;box-shadow:0 12px 30px -10px rgba(120,20,80,.4)}.demo-bar a{color:#c91f72;font-weight:800}.demo-bar button{position:absolute;right:8px;top:8px;border:0;background:none;font-size:14px;cursor:pointer;color:#5a1240}@media (max-width:900px){.demo-bar{bottom:86px}}';document.head.appendChild(st)});
 })();
 
@@ -3440,7 +3525,7 @@ function universe(){const bk=ST.books||[],tr=ST.trips||[],wk=ST.workouts||[],hb=
 function vAjustes(){const pr=(typeof PROFILES!=='undefined'&&PROFILES[ME])||{},np=ST.nprefs||{};
   return `<header class="page-h"><h1>Ajustes</h1><p>Tu cuenta, la apariencia de Her, tus avisos, tu región y tu privacidad.</p></header>
   <div class="setg">
-   <section class="setc"><h2>Perfil</h2><div class="setrow"><span>${av(ME,myNick()||'?')} <b>${esc(myNick()||'Sin apodo')}</b> ${ME?badge(ME):''}</span><a class="btn soft sm" href="#perfil">Editar perfil</a></div><div class="setrow"><span>Tipo de cuenta: <b>${esc({miembro:'Miembro',creadora:'Creadora independiente',marca:'Marca'}[acctOf(ME)])}</b></span><a class="btn soft sm" href="#negocio">Cambiar</a></div></section>
+   <section class="setc"><h2>Perfil</h2><div class="setrow"><span>${av(ME,myNick()||'?')} <b>${esc(myNick()||'Sin apodo')}</b> ${ME?badge(ME):''}</span><a class="btn soft sm" href="#perfil">Editar perfil</a></div><div class="setrow"><span>Tipo de cuenta: <b>${esc({miembro:'Miembro',creadora:'Creadora independiente',marca:'Marca'}[acctOf(ME)])}</b></span><a class="btn soft sm" href="#negocio">Cambiar</a></div>${window.HER_LOGOUT?'<div class="setrow"><span>Sesión</span><button class="btn soft sm" onclick="HER_LOGOUT()">Cerrar sesión</button></div>':''}</section>
    <section class="setc"><h2>Apariencia</h2><label class="setrow"><span>Modo oscuro</span><input type="checkbox" class="sw-t" data-setdark ${isDark()?'checked':''}></label></section>
    <section class="setc"><h2>Notificaciones</h2>${NPREFS.map(([k,n])=>`<label class="setrow"><span>${n}</span><input type="checkbox" class="sw-t" data-npref="${k}" ${np[k]===false?'':'checked'}></label>`).join('')}</section>
    <section class="setc"><h2>Región</h2><label class="setrow"><span>País</span><input id="setCountry" class="setin" maxlength="40" value="${esc(ST.country||'')}" placeholder="Ej.: Honduras"></label><label class="setrow"><span>Moneda preferida</span><select id="setCur">${CURS.map(([k,s])=>`<option value="${k}" ${(ST.cur||'USD')===k?'selected':''}>${k} (${s})</option>`).join('')}</select></label>
